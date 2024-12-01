@@ -136,8 +136,6 @@ class Auth(QMainWindow):
                 background-color: #365899;
             }
         """)
-        self.username_input.returnPressed.connect(self.login)
-        self.password_input.returnPressed.connect(self.login)
         self.login_button.clicked.connect(self.login)
         layout.addWidget(self.login_button)
 
@@ -200,7 +198,7 @@ class Auth(QMainWindow):
         self.loading_window.show()
 
         # Perform database query in the background
-        QTimer.singleShot(500, lambda: self.verify_credentials(username, password))
+        QTimer.singleShot(2000, lambda: self.verify_credentials(username, password))
 
     def verify_credentials(self, username, password):
         """Verify user credentials."""
@@ -378,7 +376,7 @@ class BookSearchApp(QMainWindow):
 
         # Search bar
         self.search_bar = QLineEdit()
-        self.search_bar.setPlaceholderText("Search your favorite books...")
+        self.search_bar.setPlaceholderText("Search for books...")
         self.search_bar.setStyleSheet("font-size: 30px; padding: 10px;")
         self.search_bar.returnPressed.connect(self.fetch_books)
 
@@ -387,6 +385,7 @@ class BookSearchApp(QMainWindow):
         self.book_table.setColumnCount(3)  # Number of columns
         self.book_table.setHorizontalHeaderLabels(["Title", "Author", "Genre"])
         self.book_table.setStyleSheet("font-size: 25px;")
+        self.book_table.horizontalHeader().setStretchLastSection(False)
 
         # Balance column sizes
         header = self.book_table.horizontalHeader()
@@ -397,9 +396,6 @@ class BookSearchApp(QMainWindow):
         self.book_table.verticalHeader().setVisible(False)  # Hide row numbers
 
         self.book_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Disable editing
-        self.book_table.setSelectionBehavior(self.book_table.SelectRows)
-        self.book_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.book_table.cellDoubleClicked.connect(self.row_double_clicked)
 
         # Loading spinner
         self.spinner = QLabel()
@@ -439,16 +435,7 @@ class BookSearchApp(QMainWindow):
         # Pagination data
         self.current_page = 1
         self.total_pages = 1
-        self.books_per_page = 50
-
-    def row_double_clicked(self, row, column):
-        #
-        # Fetch data from the clicked row
-        # title = self.table.item(row, 0).text()
-        # author = self.table.item(row, 1).text()
-        # genre = self.table.item(row, 2).text()
-
-        print("CLicked")
+        self.books_per_page = 10
 
     def load_previous_page(self):
         """Load the previous page of books."""
@@ -474,9 +461,8 @@ class BookSearchApp(QMainWindow):
         msg_box.setWindowTitle("Confirmation")
 
         # Add an OK button and no Cancel button (handled by the X button)
-        msg_box.setStandardButtons(QMessageBox.Ok | QMessageBox.No)
-        msg_box.button(QMessageBox.Ok).setText("Yes")
-        msg_box.button(QMessageBox.No).setText("No")
+        msg_box.setStandardButtons(QMessageBox.Ok)
+        msg_box.button(QMessageBox.Ok).setText("OK")
 
         # Show the message box and capture the result
         result = msg_box.exec_()
