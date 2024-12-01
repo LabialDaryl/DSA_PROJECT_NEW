@@ -74,9 +74,6 @@ class Auth(QMainWindow):
         subtitle.setStyleSheet("color: #0000;")
         layout.addWidget(subtitle)
 
-
-# layout jari ngari
-        
         layout.addSpacing(20)  # Spacer
 
         # Username input
