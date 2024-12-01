@@ -75,6 +75,8 @@ class Auth(QMainWindow):
         layout.addWidget(subtitle)
 
 
+# layout jari ngari
+        
         layout.addSpacing(20)  # Spacer
 
         # Username input
