@@ -1,8 +1,6 @@
-import sqlite3
-import sys
+import random, string, sqlite3, sys, requests, os, json
 
-import requests
-from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer, QDateTime
 from PyQt5.QtGui import QFont, QIcon, QMovie
 from PyQt5.QtWidgets import QMessageBox, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QListWidgetItem, \
     QPushButton, QLabel, QLineEdit, QApplication, QListWidget, QStackedLayout, QSpacerItem, QSizePolicy, QDialog, \
@@ -24,6 +22,8 @@ def toggle_password_visibility(password_input, button):
 class Auth(QMainWindow):
     def __init__(self):
         super().__init__()
+        self.user_id = None
+        self.loading_window = None
         self.loading_dialog = None
         self.main_app = None
         self.setWindowFlags(Qt.FramelessWindowHint)
@@ -31,6 +31,10 @@ class Auth(QMainWindow):
         self.setStyleSheet("background-color: #6BA3BE;")
         self.center_window()
 
+        # generate random gibberish to act as unique for user
+        self.characters = string.ascii_letters + string.digits + string.punctuation
+        # Generate a random string of the specified length
+        self.unique_id = ''.join(random.choices(self.characters, k=16))
 
         # Central widget and layout
         self.central_widget = QWidget(self)
@@ -159,7 +163,8 @@ class Auth(QMainWindow):
 
         self.init_db()
 
-    def init_db(self):
+    @staticmethod
+    def init_db():
         """Initialize the SQLite3 database and create tables if they don't exist."""
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
@@ -178,6 +183,16 @@ class Auth(QMainWindow):
             title TEXT NOT NULL,
             author TEXT NOT NULL,
             year INTEGER
+        )
+        """)
+
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS search_history (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id VARCHAR(255) NOT NULL,
+            query TEXT NOT NULL,
+            timestamp DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (user_id) REFERENCES user(id) ON DELETE CASCADE
         )
         """)
 
@@ -205,7 +220,7 @@ class Auth(QMainWindow):
         """Verify user credentials."""
         conn = sqlite3.connect(DB_FILE)
         cursor = conn.cursor()
-        cursor.execute("SELECT * FROM user WHERE username = ? AND password = ?", (username, password))
+        cursor.execute("SELECT id FROM user WHERE username = ? AND password = ?", (username, password))
         result = cursor.fetchone()
         conn.close()
 
@@ -213,6 +228,7 @@ class Auth(QMainWindow):
         self.loading_window.close()
 
         if result:
+            self.user_id = result[0]  # Store the user ID
             self.open_main_app()
         else:
             QMessageBox.warning(self, "Login Failed", "Invalid username or password!")
@@ -220,7 +236,7 @@ class Auth(QMainWindow):
 
     def open_main_app(self):
         """Open the main application window."""
-        self.main_app = BookSearchApp()
+        self.main_app = BookSearchApp(self.user_id)
         self.main_app.show()
 
     def sign_up(self):
@@ -238,8 +254,8 @@ class Auth(QMainWindow):
             cursor.execute("INSERT INTO user (username, password) VALUES (?, ?)", (username, password))
             conn.commit()
             QMessageBox.information(self, "Success", "Sign-up successful!")
-            username = self.username_input.clear()
-            password = self.password_input.clear()
+            self.username_input.clear()
+            self.password_input.clear()
         except sqlite3.IntegrityError:
             QMessageBox.warning(self, "Error", "Username already exists!")
         finally:
@@ -291,46 +307,102 @@ class FetchBooksThread(QThread):
     def run(self):
         """Fetch data from Open Library API with optimized pagination."""
         try:
-            # Use pagination parameters directly in the API query
-            response = requests.get(
-                f"https://openlibrary.org/search.json",
-                params={
-                    "q": self.query,
-                    "page": self.current_page,
-                    "limit": self.books_per_page,
-                    "fields": "title,author_name,subject"
-                },
-                timeout=10  # Set a timeout to avoid long waits
-            )
-
-            if response.status_code == 200:
-                data = response.json()
-                books = data.get("docs", [])
-                total_books = data.get("numFound", 0)
-
-                # Process fetched data
-                book_data = [
-                    [
-                        book.get("title", "Unknown Title"),
-                        ", ".join(book.get("author_name", ["Unknown Author"])),
-                        ", ".join(book.get("subject", ["Unknown Genre"])[:3])  # Limit genres to 3
-                    ]
-                    for book in books
-                ]
-
-                self.data_fetched.emit(book_data, total_books)
+            # Detect if the query is an ISBN (assumes ISBN-10 or ISBN-13 format)
+            if self.query.isdigit() and len(self.query) in [10, 13]:
+                response = requests.get(
+                    f"https://openlibrary.org/api/books",
+                    params={
+                        "bibkeys": f"ISBN:{self.query}",
+                        "format": "json",
+                        "jscmd": "data"
+                    },
+                    timeout=10  # Set a timeout to avoid long waits
+                )
+                if response.status_code == 200:
+                    data = response.json()
+                    if data:
+                        book = data.get(f"ISBN:{self.query}", {})
+                        book_data = [[
+                            book.get("title", "Unknown Title"),
+                            ", ".join([author.get("name", "Unknown Author") for author in book.get("authors", [])]),
+                            book.get("publish_date", "Unknown Date")
+                        ]]
+                        self.data_fetched.emit(book_data, 1)
+                    else:
+                        self.data_fetched.emit([], 0)
+                else:
+                    self.data_fetched.emit([], 0)
             else:
-                # Emit empty data in case of a failed response
-                self.data_fetched.emit([], 0)
+                # Use pagination parameters directly in the API query
+                response = requests.get(
+                    f"https://openlibrary.org/search.json",
+                    params={
+                        "q": self.query,
+                        "page": self.current_page,
+                        "limit": self.books_per_page,
+                        "fields": "title,author_name,subject"
+                    },
+                    timeout=10  # Set a timeout to avoid long waits
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    books = data.get("docs", [])
+                    total_books = data.get("numFound", 0)
+
+                    # Process fetched data
+                    book_data = [
+                        [
+                            book.get("title", "Unknown Title"),
+                            ", ".join(book.get("author_name", ["Unknown Author"])),
+                            ", ".join(book.get("subject", ["Unknown Genre"])[:3])  # Limit genres to 3
+                        ]
+                        for book in books
+                    ]
+
+                    self.data_fetched.emit(book_data, total_books)
+                else:
+                    self.data_fetched.emit([], 0)
         except Exception as e:
             print(f"Error fetching books: {e}")
             self.data_fetched.emit([], 0)
 
 
+def row_double_clicked():
+    #
+    # Fetch data from the clicked row
+    # title = self.table.item(row, 0).text()
+    # author = self.table.item(row, 1).text()
+    # genre = self.table.item(row, 2).text()
+
+    print("CLicked")
+
 
 class BookSearchApp(QMainWindow):
-    def __init__(self):
+    def __init__(self, user_id):
         super().__init__()
+        self.history_window = None
+        self.thread = None
+        self.books_per_page = None
+        self.total_pages = None
+        self.current_page = None
+        self.next_button = None
+        self.page_label = None
+        self.prev_button = None
+        self.pagination_layout = None
+        self.stacked_layout = None
+        self.movie = None
+        self.spinner = None
+        self.book_table = None
+        self.search_bar = None
+        self.logo_label = None
+        self.logout_action = None
+        self.menu = None
+        self.burger_menu_button = None
+        self.top_bar = None
+        self.layout = None
+        self.central_widget = None
+        self.user_id = user_id
         self.auth_window = None
         self.setWindowTitle("Book Search App")
         self.setWindowFlags(Qt.FramelessWindowHint)  # Remove title bar
@@ -358,11 +430,13 @@ class BookSearchApp(QMainWindow):
 
         self.menu = QMenu()
         self.logout_action = QAction("Logout", self)
+        self.search_history = QAction("Search History", self)
+        self.menu.addAction(self.search_history)
         self.menu.addAction(self.logout_action)
-
 
         # Connect the logout action's clicked signal to the open_auth method
         self.logout_action.triggered.connect(self.open_auth)
+        self.search_history.triggered.connect(self.open_search_history)
         self.burger_menu_button.setMenu(self.menu)
 
         # Logo placeholder
@@ -398,7 +472,7 @@ class BookSearchApp(QMainWindow):
         self.book_table.setEditTriggers(QTableWidget.NoEditTriggers)  # Disable editing
         self.book_table.setSelectionBehavior(self.book_table.SelectRows)
         self.book_table.setSelectionMode(QTableWidget.SingleSelection)
-        self.book_table.cellDoubleClicked.connect(self.row_double_clicked)
+        self.book_table.cellDoubleClicked.connect(row_double_clicked)
 
         # Loading spinner
         self.spinner = QLabel()
@@ -440,15 +514,6 @@ class BookSearchApp(QMainWindow):
         self.total_pages = 1
         self.books_per_page = 50
 
-    def row_double_clicked(self, row, column):
-        #
-        # Fetch data from the clicked row
-        # title = self.table.item(row, 0).text()
-        # author = self.table.item(row, 1).text()
-        # genre = self.table.item(row, 2).text()
-
-        print("CLicked")
-
     def load_previous_page(self):
         """Load the previous page of books."""
         if self.current_page > 1:
@@ -482,12 +547,17 @@ class BookSearchApp(QMainWindow):
 
         if result == QMessageBox.Ok:
             # Proceed with logout
+            self.user_id = None
             self.close()  # Close the current window
             self.auth_window = Auth()  # Create an instance of the Auth window
             self.auth_window.show()  # Show the Auth window
         else:
             # Cancel the logout action
             pass
+
+    def open_search_history(self):
+        self.history_window = SearchHistoryWindow(self.user_id)
+        self.history_window.show()
 
     def fetch_initial_books(self):
         """Fetch a default set of books when the app starts."""
@@ -500,8 +570,16 @@ class BookSearchApp(QMainWindow):
         """Fetch books based on the search query and current page."""
         query = self.search_bar.text().strip()
         if not query:
-            return
+            return  # Do nothing if the search bar is empty
 
+        # Save the search query to history
+        try:
+            timestamp = QDateTime.currentDateTime().toString("yyyy-MM-dd HH:mm:ss")
+            self.save_search_history(self.user_id, query, timestamp)
+        except Exception as e:
+            print(f"Error saving search history: {e}")
+
+        # Show the loading spinner and start fetching books
         self.switch_to_spinner()
         self.thread = FetchBooksThread(query, current_page=self.current_page, books_per_page=self.books_per_page)
         self.thread.data_fetched.connect(self.display_books)
@@ -530,15 +608,125 @@ class BookSearchApp(QMainWindow):
         else:
             self.book_table.setRowCount(1)
             self.book_table.setItem(0, 0, QTableWidgetItem("No results found."))
+            self.book_table.setItem(0, 1, QTableWidgetItem(""))
+            self.book_table.setItem(0, 2, QTableWidgetItem(""))
 
-        # Update total pages and page label
-        self.total_pages = (total_books + self.books_per_page - 1) // self.books_per_page
-        self.update_page_label()
+        # Update total pages only for non-ISBN queries
+        if not self.search_bar.text().strip().isdigit():
+            self.total_pages = (total_books + self.books_per_page - 1) // self.books_per_page
+            self.update_page_label()
+        else:
+            self.page_label.setText("ISBN Search")
+
         self.switch_to_book_list()
 
     def open_burger_menu(self):
         """Show the burger menu."""
         self.menu.exec_(self.burger_menu_button.mapToGlobal(Qt.Point(0, 30)))
+
+    @staticmethod
+    def save_search_history(user_id, query, timestamp):
+        """Save the user's search history to a JSON file."""
+        file_path = "search_history.json"
+
+        # Ensure user_id is always stored as a string
+        user_id = str(user_id)
+
+        # Initialize the file if it doesn't exist or is invalid
+        if not os.path.exists(file_path):
+            data = {}
+        else:
+            try:
+                with open(file_path, "r") as file:
+                    data = json.load(file)
+            except json.JSONDecodeError:
+                print("Corrupted or empty search history file. Reinitializing.")
+                data = {}
+
+        # Add or update the user's search history
+        if user_id not in data:
+            data[user_id] = []
+
+        data[user_id].append({"query": query, "timestamp": timestamp})
+
+        # Save back to file
+        with open(file_path, "w") as file:
+            json.dump(data, file, indent=4)
+        print(f"Search history saved for user ID: {user_id}")
+
+
+class SearchHistoryWindow(QWidget):
+    def __init__(self, user_id):
+        super().__init__()
+        self.user_id = user_id
+        self.setWindowTitle("Search History")
+        self.setGeometry(150, 150, 500, 400)
+
+        # Set layout
+        layout = QVBoxLayout()
+
+        # Add a label
+        label = QLabel(f"Displaying search history for user ID: {self.user_id}")
+        layout.addWidget(label)
+
+        # Add a table for search history
+        self.history_table = QTableWidget()
+        self.history_table.setColumnCount(3)
+        self.history_table.setHorizontalHeaderLabels(["Query", "Timestamp", "Other Info"])
+        layout.addWidget(self.history_table)
+
+        # Add Refresh button
+        self.refresh_button = QPushButton("Refresh")
+        self.refresh_button.clicked.connect(self.load_search_history)  # Connect to the method
+        layout.addWidget(self.refresh_button)
+
+        # Populate the table with the initial data
+        self.load_search_history()
+
+        # Set the layout
+        self.setLayout(layout)
+
+    def load_search_history(self):
+        """Load and display search history for the current user."""
+        file_path = "search_history.json"
+
+        # Ensure user_id is always a string
+        user_id = str(self.user_id)
+
+        # Check if the JSON file exists
+        if not os.path.exists(file_path):
+            print("Search history file does not exist.")
+            self.history_table.setRowCount(0)  # Clear the table
+            return
+
+        # Load the JSON file
+        try:
+            with open(file_path, "r") as file:
+                data = json.load(file)
+        except json.JSONDecodeError:
+            print("Search history file is corrupted.")
+            self.history_table.setRowCount(0)  # Clear the table
+            return
+
+        # Check if user_id exists in the file
+        if user_id not in data:
+            print(f"No search history found for user ID: {user_id}")
+            self.history_table.setRowCount(0)  # Clear the table
+            return
+
+        # Retrieve and display the user's search history
+        user_history = data[user_id]
+        print(f"Loaded search history for user ID: {user_id}: {user_history}")
+
+        # Populate the table with the user's history
+        self.history_table.setRowCount(len(user_history))
+        for row, entry in enumerate(user_history):
+            query = entry["query"]
+            timestamp = entry["timestamp"]
+            info = "N/A"  # Replace with additional info if needed
+            self.history_table.setItem(row, 0, QTableWidgetItem(query))
+            self.history_table.setItem(row, 1, QTableWidgetItem(timestamp))
+            self.history_table.setItem(row, 2, QTableWidgetItem(info))
 
 
 def main():
